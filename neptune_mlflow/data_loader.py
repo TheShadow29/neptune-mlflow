@@ -20,6 +20,20 @@ import re
 import click
 import mlflow
 import path as path_utils
+from datetime import datetime
+
+
+def mlflow_time_int_trim(t):
+    if isinstance(t, str) or isinstance(t, int):
+        return int(str(t)[:10])
+    else:
+        return 0
+
+
+def mlflow_time_to_str(t):
+    trimmed_t = mlflow_time_int_trim(t)
+    return datetime.fromtimestamp(trimmed_t).strftime("%Y-%m-%d %H:%M:%S")
+
 
 class DataLoader(object):
 
@@ -27,6 +41,8 @@ class DataLoader(object):
     MLFLOW_EXPERIMENT_NAME_PROPERTY = "mlflow/experiment/name"
     MLFLOW_RUN_ID_PROPERTY = "mlflow/run/uuid"
     MLFLOW_RUN_NAME_PROPERTY = "mlflow/run/name"
+    MLFLOW_START_TIME = "mlflow/run/start_time"
+    MLFLOW_END_TIME = "mlflow/run/end_time"
 
     def __init__(self, project, path):
         self._project = project
@@ -38,21 +54,42 @@ class DataLoader(object):
             experiments = mlflow_client.list_experiments()
 
             for experiment in experiments:
-                run_infos = mlflow_client.list_run_infos(experiment_id=experiment.experiment_id)
-                existing_experiments = self._project.get_experiments(tag=DataLoader._to_proper_tag(experiment.name))
-                existing_run_uuids = set([
-                    str(e.get_properties().get(DataLoader.MLFLOW_RUN_ID_PROPERTY)) for e in existing_experiments
-                ])
-
-                for run_info in run_infos:
-                    run_qualified_name = self._get_run_qualified_name(experiment, run_info)
+                run_infos = mlflow_client.list_run_infos(
+                    experiment_id=experiment.experiment_id
+                )
+                existing_experiments = self._project.get_experiments(
+                    tag=DataLoader._to_proper_tag(experiment.name)
+                )
+                existing_run_uuids = set(
+                    [
+                        str(e.get_properties().get(DataLoader.MLFLOW_RUN_ID_PROPERTY))
+                        for e in existing_experiments
+                    ]
+                )
+                run_infos_sorted = sorted(
+                    run_infos,
+                    key=lambda x: mlflow_time_int_trim(x.start_time),
+                    reverse=False,
+                )
+                for run_info in run_infos_sorted:
+                    run_qualified_name = self._get_run_qualified_name(
+                        experiment, run_info
+                    )
                     if run_info.run_uuid not in existing_run_uuids:
                         click.echo("Loading run {}".format(run_qualified_name))
                         run = mlflow_client.get_run(run_info.run_uuid)
                         exp_uuid = self._create_neptune_experiment(experiment, run)
-                        click.echo("Run {} was saved as {}".format(run_qualified_name, exp_uuid))
+                        click.echo(
+                            "Run {} was saved as {}".format(
+                                run_qualified_name, exp_uuid
+                            )
+                        )
                     else:
-                        click.echo("Ignoring run {} since it already exists".format(run_qualified_name))
+                        click.echo(
+                            "Ignoring run {} since it already exists".format(
+                                run_qualified_name
+                            )
+                        )
 
     def _create_neptune_experiment(self, experiment, run):
         with self._project.create_experiment(
@@ -66,16 +103,19 @@ class DataLoader(object):
             upload_stderr=False,
             send_hardware_metrics=False,
             run_monitoring_thread=False,
-            handle_uncaught_exceptions=True
+            handle_uncaught_exceptions=True,
         ) as neptune_exp:
-            if run.info.artifact_uri.startswith('file:/'):
+            if run.info.artifact_uri.startswith("file:/"):
                 artifacts_path = run.info.artifact_uri[6:]
                 with path_utils.Path(artifacts_path):
                     for artifact in os.listdir(artifacts_path):
                         neptune_exp.send_artifact(artifact)
             else:
-                click.echo('WARNING: Remote artifacts are not supported and won\'t be uploaded (artifact_uri: {}).'
-                           .format(run.info.artifact_uri))
+                click.echo(
+                    "WARNING: Remote artifacts are not supported and won't be uploaded (artifact_uri: {}).".format(
+                        run.info.artifact_uri
+                    )
+                )
 
             for metric_key in run.data.metrics.keys():
                 self._create_metric(neptune_exp, experiment, run, metric_key)
@@ -102,7 +142,9 @@ class DataLoader(object):
             DataLoader.MLFLOW_EXPERIMENT_ID_PROPERTY: str(experiment.experiment_id),
             DataLoader.MLFLOW_EXPERIMENT_NAME_PROPERTY: experiment.name,
             DataLoader.MLFLOW_RUN_ID_PROPERTY: run.info.run_uuid,
-            DataLoader.MLFLOW_RUN_NAME_PROPERTY: DataLoader._get_mlflow_run_name(run) or ''
+            DataLoader.MLFLOW_RUN_NAME_PROPERTY: DataLoader._get_mlflow_run_name(run),
+            DataLoader.MLFLOW_START_TIME: mlflow_time_to_str(run.info.start_time),
+            DataLoader.MLFLOW_END_TIME: mlflow_time_to_str(run.info.end_time) or "",
         }
         for key, value in run.data.tags.items():
             properties[key] = value
@@ -110,7 +152,7 @@ class DataLoader(object):
 
     @staticmethod
     def _get_tags(experiment, run):
-        tags = [DataLoader._to_proper_tag(experiment.name), 'mlflow']
+        tags = [DataLoader._to_proper_tag(experiment.name), "mlflow"]
         if DataLoader._get_mlflow_run_name(run):
             tags.append(DataLoader._to_proper_tag(DataLoader._get_mlflow_run_name(run)))
         return tags
@@ -121,7 +163,9 @@ class DataLoader(object):
 
     @staticmethod
     def _get_metric_file(experiment, run_info, metric_key):
-        return "mlruns/{}/{}/metrics/{}".format(experiment.experiment_id, run_info.run_uuid, metric_key)
+        return "mlruns/{}/{}/metrics/{}".format(
+            experiment.experiment_id, run_info.run_uuid, metric_key
+        )
 
     @staticmethod
     def _get_name_for_experiment(experiment):
@@ -134,4 +178,4 @@ class DataLoader(object):
 
     @staticmethod
     def _get_mlflow_run_name(run):
-        return run.data.tags.get('mlflow.runName', None)
+        return run.data.tags.get("mlflow.runName", None)
